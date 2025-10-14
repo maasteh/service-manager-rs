@@ -10,11 +10,59 @@ use std::{
     ffi::OsStr,
     io,
     path::PathBuf,
-    process::{Command, Output, Stdio},
+    process::{Command, Output, Stdio}
 };
 
 static LAUNCHCTL: &str = "launchctl";
 const PLIST_FILE_PERMISSIONS: u32 = 0o644;
+
+/// Target domain provided as the second argument to 'launchctl <domain-target>'
+/// man launchctl
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LaunchdTargetDomain {
+    /// gui/<uid>/[service-name]
+    UserGui,
+    // /// user/<uid>/[service-name]
+    // User, 
+    // /// login/<asid>/[service-name]
+    // UserAsid, 
+    // /// pid/<pid>/[service-name]
+    // Process,
+    /// system/[service-name]
+    // SystemAgent, 
+    /// system/[service-name]
+    System, 
+}
+
+
+/// Directory at which the plist file is located.
+pub struct LaunchdDirectory(PathBuf);
+impl LaunchdDirectory {
+    /// Per-user agents provided by the user.
+    pub fn user_agent(username: &str) -> Self {
+        Self(PathBuf::from(&format!("/Users/{username}/Library/LaunchAgents")))
+    }
+
+    /// Per-user agents provided by the administrator.
+    pub fn admin_agent() -> Self {
+        Self(PathBuf::from("/Library/LaunchAgents"))
+    }
+
+    /// System wide daemons provided by the administrator.
+    pub fn admin_daemon() -> Self {
+        Self(PathBuf::from("/Library/LaunchDaemons"))
+    }
+
+    /// OS X Per-user agents.
+    pub fn system_agent() -> Self {
+        Self(PathBuf::from("/System/Library/LaunchAgents"))
+    }
+
+    /// OS X System wide daemons.
+    pub fn system_daemon() -> Self {
+        Self(PathBuf::from("/System/Library/LaunchDaemons"))
+    }
+}
 
 /// Configuration settings tied to launchd services
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -36,15 +84,22 @@ impl Default for LaunchdInstallConfig {
 }
 
 /// Implementation of [`ServiceManager`] for MacOS's [Launchd](https://en.wikipedia.org/wiki/Launchd)
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchdServiceManager {
-    /// Whether or not this manager is operating at the user-level
-    pub user: bool,
-
+    /// For user-level context, provide user <uid> and <username>. 
+    pub user: Option<UserContext>,
+    /// Targe domain, which is provided to `launchctl print/bootstrap/bootout/..` as the second argument.
+    pub target_domain: LaunchdTargetDomain,
     /// Configuration settings tied to launchd services
     pub config: LaunchdConfig,
 }
 
+impl Default for LaunchdServiceManager {
+    fn default() -> Self {
+        Self { user: None, target_domain: LaunchdTargetDomain::System, config: LaunchdConfig::default()}
+    }
+}
+pub type UserContext = (u32, String);
 impl LaunchdServiceManager {
     /// Creates a new manager instance working with system services
     pub fn system() -> Self {
@@ -52,23 +107,11 @@ impl LaunchdServiceManager {
     }
 
     /// Creates a new manager instance working with user services
-    pub fn user() -> Self {
-        Self::default().into_user()
-    }
-
-    /// Change manager to work with system services
-    pub fn into_system(self) -> Self {
+    pub fn user(uid: u32, username: String) -> Self {
         Self {
-            config: self.config,
-            user: false,
-        }
-    }
-
-    /// Change manager to work with user services
-    pub fn into_user(self) -> Self {
-        Self {
-            config: self.config,
-            user: true,
+            user: Some((uid, username)),
+            target_domain: LaunchdTargetDomain::UserGui,
+            config: LaunchdConfig::default()
         }
     }
 
@@ -77,18 +120,42 @@ impl LaunchdServiceManager {
         Self {
             config,
             user: self.user,
+            target_domain: self.target_domain,
         }
     }
 
-    fn get_plist_path(&self, qualified_name: String) -> PathBuf {
-        let dir_path = if self.user {
-            user_agent_dir_path().unwrap()
-        } else {
-            global_daemon_dir_path()
+    fn get_plist_path(&self, qualified_name: &str) -> PathBuf {
+        let dir = match (&self.user, &self.target_domain) {
+            (None, LaunchdTargetDomain::System) => LaunchdDirectory::admin_daemon(),
+            (Some((_, username)), LaunchdTargetDomain::UserGui) => LaunchdDirectory::user_agent(username.as_str()),
+            _ => unimplemented!("todo!")
         };
-
-        dir_path.join(format!("{}.plist", qualified_name))
+        dir.0.join(format!("{qualified_name}.plist"))
     }
+
+    fn domain_target_string(&self) -> String {
+        match &self.target_domain {
+            LaunchdTargetDomain::System => "system".to_string(),
+            LaunchdTargetDomain::UserGui => format!("gui/{}", self.user.as_ref().map(|(uid, _)| uid.clone()).expect("must have user context for a UserGui target_domain"))
+        }
+    }
+
+    fn get_plist_contents(&self, ctx: &ServiceInstallCtx) -> Vec<u8> {
+        match &ctx.contents {
+            Some(contents) => contents.clone().into_bytes(),
+            None => make_plist(
+                &self.config.install,
+                &ctx.label.to_qualified_name(),
+                ctx.cmd_iter(),
+                self.user.clone().map(|(_, username)| username),
+                ctx.working_directory.clone(),
+                ctx.environment.clone(),
+                ctx.autostart,
+                ctx.disable_restart_on_failure
+            ).into_bytes(),
+        }
+    }
+
 }
 
 impl ServiceManager for LaunchdServiceManager {
@@ -100,172 +167,138 @@ impl ServiceManager for LaunchdServiceManager {
         }
     }
 
-    fn install(&self, ctx: ServiceInstallCtx) -> io::Result<()> {
-        let dir_path = if self.user {
-            user_agent_dir_path()?
-        } else {
-            global_daemon_dir_path()
-        };
+    fn status(&self, ctx: crate::ServiceStatusCtx) -> io::Result<crate::ServiceStatus> {
+        let full_identifier = format!("{}/{}", self.domain_target_string(), ctx.label.to_qualified_name());
+        let output = launchctl(&["print", &full_identifier])?;
+        
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
 
-        std::fs::create_dir_all(&dir_path)?;
-
-        let qualified_name = ctx.label.to_qualified_name();
-        let plist_path = dir_path.join(format!("{}.plist", qualified_name));
-        let plist = match ctx.contents {
-            Some(contents) => contents,
-            _ => make_plist(
-                &self.config.install,
-                &qualified_name,
-                ctx.cmd_iter(),
-                ctx.username.clone(),
-                ctx.working_directory.clone(),
-                ctx.environment.clone(),
-                ctx.autostart,
-                ctx.disable_restart_on_failure
-            ),
-        };
-
-        // Unload old service first if it exists
-        if plist_path.exists() {
-            let _ = wrap_output(launchctl("remove", ctx.label.to_qualified_name().as_str())?);
+        // Check for service not installed (best-effort heuristic)
+        if !output.status.success() {
+            if (output.status.code() == Some(64) || output.status.code() == Some(113)) &&
+            (stderr.contains("Could not find service") || stdout.contains("Could not find service")) {
+                return Ok(crate::ServiceStatus::NotInstalled);
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!(
+                        "launchctl failed with exit code {:?}: {}",
+                        output.status.code(),
+                        if !stderr.trim().is_empty() { stderr } else { stdout }
+                    ),
+                ));
+            }
         }
 
+        // Use stdout if available, fallback to stderr
+        let out: Cow<str> = if !stdout.trim().is_empty() { Cow::Borrowed(&stdout) } else { Cow::Borrowed(&stderr) };
+
+        // Parse lines containing "state"
+        for line in out.lines().map(str::trim) {
+            if line.contains("state") {
+                if line.contains("running") && !line.contains("not running") {
+                    return Ok(crate::ServiceStatus::Running);
+                } else if line.contains("not running") {
+                    return Ok(crate::ServiceStatus::Stopped(None));
+                }
+            }
+        }
+
+        // Fallback: assume stopped if no state info found, and return the stdout to user for more information
+        Ok(crate::ServiceStatus::Stopped(Some(out.to_string())))
+    }
+
+    fn install(&self, ctx: ServiceInstallCtx) -> io::Result<()> {
+        let identifier = ctx.label.to_qualified_name();
+        let plist_path = self.get_plist_path(&identifier);
+        let plist_bytes = self.get_plist_contents(&ctx);
+
+        // Uninstall the same service with in the same domain if it exist.
+        self.uninstall(ServiceUninstallCtx { label:  ctx.label});
+
+        // Write the new `/.plist`
+        if let Some(p) = plist_path.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        
         utils::write_file(
             plist_path.as_path(),
-            plist.as_bytes(),
+            &plist_bytes,
             PLIST_FILE_PERMISSIONS,
         )?;
 
         // Load the service.
-        // If "KeepAlive" is set to true, the service will immediately start.
-        wrap_output(launchctl("load", plist_path.to_string_lossy().as_ref())?)?;
+        wrap_output(launchctl(&["bootstrap", &self.domain_target_string(), &plist_path.to_string_lossy().to_string()])?)?;
 
         Ok(())
     }
 
     fn uninstall(&self, ctx: ServiceUninstallCtx) -> io::Result<()> {
-        let plist_path = self.get_plist_path(ctx.label.to_qualified_name());
-        // Service might already be removed (if it has "KeepAlive")
-        let _ = wrap_output(launchctl("remove", ctx.label.to_qualified_name().as_str())?);
-        let _ = std::fs::remove_file(plist_path);
+        let identifier = ctx.label.to_qualified_name();
+        let plist_path = self.get_plist_path(&identifier);
+
+        // Unload the service        
+        wrap_output(launchctl(&["bootout", &self.domain_target_string(), &plist_path.to_string_lossy().to_string()])?)?;
+
+        // Remove the .plist file
+        std::fs::remove_file(plist_path)?;
+
         Ok(())
     }
 
-    fn start(&self, ctx: ServiceStartCtx) -> io::Result<()> {
-        // To start services that do not have "KeepAlive" set to true
-        wrap_output(launchctl("start", ctx.label.to_qualified_name().as_str())?)?;
+    fn start(&self, ctx: ServiceStartCtx) -> io::Result<()> { 
+        let full_identifier = format!("{}/{}", self.domain_target_string(), ctx.label.to_qualified_name());
+        wrap_output(launchctl(&["kickstart", &full_identifier])?)?;
         Ok(())
     }
 
     /// Stops a service.
-    ///
     /// To stop a service with "KeepAlive" enabled, call `uninstall` instead.
     fn stop(&self, ctx: ServiceStopCtx) -> io::Result<()> {
-        wrap_output(launchctl("stop", ctx.label.to_qualified_name().as_str())?)?;
-        Ok(())
+        let full_identifier = format!("{}/{}", self.domain_target_string(), ctx.label.to_qualified_name());
+        let output =  launchctl(&["kill", ctx.signal.to_str(), &full_identifier])?;
+        match output.status.code() {
+            Some(0) => Ok(()),
+            Some(3) => Ok(()),
+            _ => {
+                wrap_output(output)?;
+                Ok(())
+            }
+        }
     }
 
     fn level(&self) -> ServiceLevel {
-        if self.user {
-            ServiceLevel::User
-        } else {
-            ServiceLevel::System
+        match self.target_domain {
+            LaunchdTargetDomain::System => ServiceLevel::System,
+            LaunchdTargetDomain::UserGui => ServiceLevel::User
         }
     }
 
     fn set_level(&mut self, level: ServiceLevel) -> io::Result<()> {
         match level {
-            ServiceLevel::System => self.user = false,
-            ServiceLevel::User => self.user = true,
+            ServiceLevel::System => {
+                self.target_domain = LaunchdTargetDomain::System
+            },
+            ServiceLevel::User => {
+                self.target_domain = LaunchdTargetDomain::UserGui
+            },
         }
-
         Ok(())
     }
-
-    fn status(&self, ctx: crate::ServiceStatusCtx) -> io::Result<crate::ServiceStatus> {
-        let mut service_name = ctx.label.to_qualified_name();
-        // Due to we could not get the status of a service via a service label, so we have to run this command twice
-        // in first time, if there is a service exists, the output will advice us a full service label with a prefix.
-        // Or it will return nothing, it means the service is not installed(not exists).
-        let mut out: Cow<str> = Cow::Borrowed("");
-        for i in 0..2 {
-            let output = launchctl("print", &service_name)?;
-            if !output.status.success() {
-                if output.status.code() == Some(64) {
-                    // 64 is the exit code for a service not found
-                    out = Cow::Owned(String::from_utf8_lossy(&output.stderr).to_string());
-                    if out.trim().is_empty() {
-                        out = Cow::Owned(String::from_utf8_lossy(&output.stdout).to_string());
-                    }
-                    if i == 0 {
-                        let label = out.lines().find(|line| line.contains(&service_name));
-                        match label {
-                            Some(label) => {
-                                service_name = label.trim().to_string();
-                                continue;
-                            }
-                            None => return Ok(crate::ServiceStatus::NotInstalled),
-                        }
-                    } else {
-                        // We have access to the full service label, so it impossible to get the failed status, or it must be input error.
-                        return Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            format!(
-                                "Command failed with exit code {}: {}",
-                                output.status.code().unwrap_or(-1),
-                                out
-                            ),
-                        ));
-                    }
-                } else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!(
-                            "Command failed with exit code {}: {}",
-                            output.status.code().unwrap_or(-1),
-                            String::from_utf8_lossy(&output.stderr)
-                        ),
-                    ));
-                }
-            }
-            out = Cow::Owned(String::from_utf8_lossy(&output.stdout).to_string());
-        }
-        let lines = out
-            .lines()
-            .map(|s| s.trim())
-            .filter(|s| s.contains("state"))
-            .collect::<Vec<&str>>();
-        if lines
-            .into_iter()
-            .any(|s| !s.contains("not running") && s.contains("running"))
-        {
-            Ok(crate::ServiceStatus::Running)
-        } else {
-            Ok(crate::ServiceStatus::Stopped(None))
-        }
-    }
 }
 
-fn launchctl(cmd: &str, label: &str) -> io::Result<Output> {
-    Command::new(LAUNCHCTL)
-        .stdin(Stdio::null())
+fn launchctl(args: &[&str]) -> io::Result<Output> {
+    let mut cmd = Command::new(LAUNCHCTL);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .arg(cmd)
-        .arg(label)
-        .output()
-}
+        .stderr(Stdio::piped());
 
-#[inline]
-fn global_daemon_dir_path() -> PathBuf {
-    PathBuf::from("/Library/LaunchDaemons")
-}
+    for arg in args {
+        cmd.arg(arg);
+    }
 
-fn user_agent_dir_path() -> io::Result<PathBuf> {
-    Ok(dirs::home_dir()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Unable to locate home directory"))?
-        .join("Library")
-        .join("LaunchAgents"))
+    cmd.output()
 }
 
 fn make_plist<'a>(

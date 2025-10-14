@@ -101,7 +101,7 @@ pub fn run_test(manager: &TypedServiceManager, username: Option<String>) -> Opti
     ) {
         manager
             .uninstall(ServiceUninstallCtx {
-                label: service_label.clone(),
+                label: service_label.clone()
             })
             .unwrap();
 
@@ -196,6 +196,8 @@ pub fn run_test(manager: &TypedServiceManager, username: Option<String>) -> Opti
     if manager.is_openrc() && is_running_in_ci() {
         let res = manager.stop(ServiceStopCtx {
             label: service_label.clone(),
+            #[cfg(target_os = "macos")]
+            signal: LaunchctlKillSignal::Term
         });
         if res.is_err() {
             eprintln!(
@@ -207,6 +209,8 @@ pub fn run_test(manager: &TypedServiceManager, username: Option<String>) -> Opti
         manager
             .stop(ServiceStopCtx {
                 label: service_label.clone(),
+                #[cfg(target_os = "macos")]
+                signal: LaunchctlKillSignal::Term
             })
             .unwrap();
     }
@@ -231,7 +235,7 @@ pub fn run_test(manager: &TypedServiceManager, username: Option<String>) -> Opti
     eprintln!("Uninstalling service");
     manager
         .uninstall(ServiceUninstallCtx {
-            label: service_label.clone(),
+            label: service_label.clone()
         })
         .unwrap();
     wait();

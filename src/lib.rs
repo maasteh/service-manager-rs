@@ -231,7 +231,7 @@ pub struct ServiceInstallCtx {
     pub contents: Option<String>,
 
     /// Optionally supply the user the service will run as
-    ///
+    /// This is option is ignored in macOS, as the UserContext (uid, username) will be provider directly to the Manager.
     /// If not specified, the service will run as the root or Administrator user.
     pub username: Option<String>,
 
@@ -269,7 +269,15 @@ pub struct ServiceUninstallCtx {
     /// Label associated with the service
     ///
     /// E.g. `rocks.distant.manager`
-    pub label: ServiceLabel,
+    pub label: ServiceLabel
+}
+
+impl From<&ServiceInstallCtx> for ServiceUninstallCtx {
+    fn from(ctx: &ServiceInstallCtx) -> Self {
+        Self {
+            label: ctx.label.clone()
+        }
+    }
 }
 
 /// Context provided to the start function of [`ServiceManager`]
@@ -288,6 +296,82 @@ pub struct ServiceStopCtx {
     ///
     /// E.g. `rocks.distant.manager`
     pub label: ServiceLabel,
+
+    #[cfg(target_os = "macos")]
+    pub signal: LaunchctlKillSignal
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchctlKillSignal {
+    Hup,
+    Int,
+    Quit,
+    Ill,
+    Trap,
+    Abrt,
+    Bus,
+    Fpe,
+    Kill,
+    Usr1,
+    Segv,
+    Usr2,
+    Pipe,
+    Alrm,
+    Term,
+    Chld,
+    Cont,
+    Stop,
+    Tstp,
+    Ttin,
+    Ttou,
+    Urg,
+    Xcpu,
+    Xfsz,
+    Vtalrm,
+    Prof,
+    Winch,
+    Info,
+    Pwr,
+    Sys,
+}
+
+#[cfg(target_os = "macos")]
+impl LaunchctlKillSignal {
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            Self::Hup => "SIGHUP",
+            Self::Int => "SIGINT",
+            Self::Quit => "SIGQUIT",
+            Self::Ill => "SIGILL",
+            Self::Trap => "SIGTRAP",
+            Self::Abrt => "SIGABRT",
+            Self::Bus => "SIGBUS",
+            Self::Fpe => "SIGFPE",
+            Self::Kill => "SIGKILL",
+            Self::Usr1 => "SIGUSR1",
+            Self::Segv => "SIGSEGV",
+            Self::Usr2 => "SIGUSR2",
+            Self::Pipe => "SIGPIPE",
+            Self::Alrm => "SIGALRM",
+            Self::Term => "SIGTERM",
+            Self::Chld => "SIGCHLD",
+            Self::Cont => "SIGCONT",
+            Self::Stop => "SIGSTOP",
+            Self::Tstp => "SIGTSTP",
+            Self::Ttin => "SIGTTIN",
+            Self::Ttou => "SIGTTOU",
+            Self::Urg => "SIGURG",
+            Self::Xcpu => "SIGXCPU",
+            Self::Xfsz => "SIGXFSZ",
+            Self::Vtalrm => "SIGVTALRM",
+            Self::Prof => "SIGPROF",
+            Self::Winch => "SIGWINCH",
+            Self::Info => "SIGINFO",
+            Self::Pwr => "SIGPWR",
+            Self::Sys => "SIGSYS",
+        }
+    }
 }
 
 /// Context provided to the status function of [`ServiceManager`]
