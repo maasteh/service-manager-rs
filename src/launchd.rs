@@ -257,7 +257,11 @@ impl ServiceManager for LaunchdServiceManager {
     /// To stop a service with "KeepAlive" enabled, call `uninstall` instead.
     fn stop(&self, ctx: ServiceStopCtx) -> io::Result<()> {
         let full_identifier = format!("{}/{}", self.domain_target_string(), ctx.label.to_qualified_name());
-        let output =  launchctl(&["kill", ctx.signal.to_str(), &full_identifier])?;
+        let args: &[&str; 0] = &[];
+        #[cfg(target_os = "macos")]
+        let args = &["kill", ctx.signal.to_str(), &full_identifier];
+    
+        let output =  launchctl(args)?;
         match output.status.code() {
             Some(0) => Ok(()),
             Some(3) => Ok(()),
