@@ -73,13 +73,17 @@ pub struct LaunchdConfig {
 /// Configuration settings tied to launchd services during installation
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchdInstallConfig {
-    /// If true, will include `KeepAlive` flag set to true
+    /// If true, will include `KeepAlive` key set to true in the plist
     pub keep_alive: bool,
+    /// If provider, will include `StandardOutPath` key in the plist
+    pub std_out: Option<PathBuf>,
+    /// If provider, will include `StandardErrorPath` key in the plist
+    pub std_err: Option<PathBuf>,
 }
 
 impl Default for LaunchdInstallConfig {
     fn default() -> Self {
-        Self { keep_alive: true }
+        Self { keep_alive: true, std_out: None, std_err: None }
     }
 }
 
@@ -150,8 +154,7 @@ impl LaunchdServiceManager {
                 self.user.clone().map(|(_, username)| username),
                 ctx.working_directory.clone(),
                 ctx.environment.clone(),
-                ctx.autostart,
-                ctx.disable_restart_on_failure
+                ctx.autostart
             ).into_bytes(),
         }
     }
@@ -312,8 +315,7 @@ fn make_plist<'a>(
     username: Option<String>,
     working_directory: Option<PathBuf>,
     environment: Option<Vec<(String, String)>>,
-    autostart: bool,
-    disable_restart_on_failure: bool,
+    autostart: bool
 ) -> String {
     let mut dict = Dictionary::new();
 
@@ -327,10 +329,8 @@ fn make_plist<'a>(
         Value::Array(program_arguments),
     );
 
-    if !disable_restart_on_failure {
-        dict.insert("KeepAlive".to_string(), Value::Boolean(config.keep_alive));
-    }
-
+    dict.insert("KeepAlive".to_string(), Value::Boolean(config.keep_alive));
+    
     if let Some(username) = username {
         dict.insert("UserName".to_string(), Value::String(username));
     }
@@ -357,6 +357,14 @@ fn make_plist<'a>(
         dict.insert("RunAtLoad".to_string(), Value::Boolean(true));
     } else {
         dict.insert("RunAtLoad".to_string(), Value::Boolean(false));
+    }
+
+    if let Some(path) = &config.std_out {
+        dict.insert("StandardOutPath".to_string(), Value::String(path.to_string_lossy().into()));
+    }
+
+    if let Some(path) = &config.std_err {
+        dict.insert("StandardErrorPath".to_string(), Value::String(path.to_string_lossy().into()));
     }
 
     let plist = Value::Dictionary(dict);
