@@ -26,6 +26,8 @@ pub struct SystemdInstallConfig {
     pub start_limit_burst: Option<u32>,
     pub restart: SystemdServiceRestartType,
     pub restart_sec: Option<u32>,
+    pub std_out: Option<PathBuf>,
+    pub std_err: Option<PathBuf>,
 }
 
 impl Default for SystemdInstallConfig {
@@ -35,6 +37,8 @@ impl Default for SystemdInstallConfig {
             start_limit_burst: None,
             restart: SystemdServiceRestartType::OnFailure,
             restart_sec: None,
+            std_out: None,
+            std_err: None
         }
     }
 }
@@ -269,6 +273,8 @@ fn make_service(
         start_limit_burst,
         restart,
         restart_sec,
+        std_out, 
+        std_err
     } = config;
 
     let mut service = String::new();
@@ -296,6 +302,13 @@ fn make_service(
         for (var, val) in env_vars {
             let _ = writeln!(service, "Environment=\"{var}={val}\"");
         }
+    }
+    if let Some(path) = std_out {
+        let _ = writeln!(service, "StandardOutput={}", path.to_string_lossy());
+    }
+
+    if let Some(path) = std_err {
+        let _ = writeln!(service, "StandardError={}", path.to_string_lossy());
     }
 
     let program = ctx.program.to_string_lossy();
