@@ -304,11 +304,11 @@ fn make_service(
         }
     }
     if let Some(path) = std_out {
-        let _ = writeln!(service, "StandardOutput={}", path.to_string_lossy());
+        let _ = writeln!(service, "StandardOutput=append:{}", path.to_string_lossy());
     }
 
     if let Some(path) = std_err {
-        let _ = writeln!(service, "StandardError={}", path.to_string_lossy());
+        let _ = writeln!(service, "StandardError=append:{}", path.to_string_lossy());
     }
 
     let program = ctx.program.to_string_lossy();
