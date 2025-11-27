@@ -103,7 +103,9 @@ impl Default for LaunchdServiceManager {
         Self { user: None, target_domain: LaunchdTargetDomain::System, config: LaunchdConfig::default()}
     }
 }
+
 pub type UserContext = (u32, String);
+
 impl LaunchdServiceManager {
     /// Creates a new manager instance working with system services
     pub fn system() -> Self {
@@ -135,6 +137,11 @@ impl LaunchdServiceManager {
             _ => unimplemented!("todo!")
         };
         dir.0.join(format!("{qualified_name}.plist"))
+    }
+
+    // <service-target> takes a form of <domain-target>/<service-id>.
+    fn service_target_string(&self, identifier: String) -> String {
+        format!("{}/{}", self.domain_target_string(), identifier)
     }
 
     fn domain_target_string(&self) -> String {
@@ -236,13 +243,14 @@ impl ServiceManager for LaunchdServiceManager {
 
         Ok(())
     }
-
+    
+    // launchctl bootout <domain-target> [service-path1, service-path2, ...] | <service-target>
     fn uninstall(&self, ctx: ServiceUninstallCtx) -> io::Result<()> {
         let identifier = ctx.label.to_qualified_name();
         let plist_path = self.get_plist_path(&identifier);
-
+        let service_target = self.service_target_string(identifier);
         // Unload the service        
-        wrap_output(launchctl(&["bootout", &self.domain_target_string(), &plist_path.to_string_lossy().to_string()])?)?;
+        wrap_output(launchctl(&["bootout", &service_target])?)?;
 
         // Remove the .plist file
         std::fs::remove_file(plist_path)?;
