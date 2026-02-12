@@ -79,12 +79,14 @@ manager.start(ServiceStartCtx {
 
 // Stop our service using the underlying service management platform
 manager.stop(ServiceStopCtx {
-    label: label.clone()
+    label: label.clone(),
+    #[cfg(target_os = "macos")]
+    signal: LaunchctlKillSignal::Term
 }).expect("Failed to stop");
 
 // Uninstall our service using the underlying service management platform
 manager.uninstall(ServiceUninstallCtx {
-    label: label.clone()
+    label: label.clone(),
 }).expect("Failed to stop");
 ```
 
